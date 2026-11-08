@@ -83,7 +83,8 @@ def main() -> None:
 			module = ".".join(test.with_suffix("").parts)
 			if module not in modules:
 				modules.append(module)
-	print("\n".join(modules))
+	if modules:
+		print("\n".join(modules))
 
 
 if __name__ == "__main__":
