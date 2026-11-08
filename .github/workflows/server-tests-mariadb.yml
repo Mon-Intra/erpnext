@@ -4,6 +4,7 @@ on:
   repository_dispatch:
     types: [frappe-framework-change]
   pull_request:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
   schedule:
     # Run everday at midnight UTC / 5:30 IST
     - cron: "0 0 * * *"

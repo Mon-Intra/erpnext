@@ -1,6 +1,7 @@
 name: 'Documentation Required'
 on:
   pull_request:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
     types: [ opened, synchronize, reopened, edited ]
 
 permissions:

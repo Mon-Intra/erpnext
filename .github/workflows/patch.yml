@@ -2,6 +2,7 @@ name: Patch
 
 on:
   pull_request:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
   workflow_dispatch:
 
 permissions:

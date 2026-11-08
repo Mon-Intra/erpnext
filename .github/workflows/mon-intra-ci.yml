@@ -1,0 +1,182 @@
+# Mon-Intra CI for the `mon-intra` branch.
+#
+# Upstream's server test workflows run the whole suite (hours) and are switched
+# off for this branch with `branches-ignore: [mon-intra]`. This workflow builds a
+# bench from our Frappe fork and this checkout, installs erpnext on a fresh site
+# (the install smoke test) and runs only the test modules next to the changed
+# files. .github/helper/mon_intra_select_tests.py picks them.
+name: Mon-Intra CI
+
+on:
+  push:
+    branches: [mon-intra]
+  pull_request:
+    branches: [mon-intra]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mon-intra-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  FRAPPE_REPO: https://github.com/Mon-Intra/frappe
+  FRAPPE_BRANCH: mon-intra
+  SITE: test_site
+  NODE_ENV: production
+
+jobs:
+  test:
+    name: Install smoke test + nearby tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=2s --health-retries=20
+
+    steps:
+      - name: Clone
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Select tests near the change
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            # The PR merge commit: first parent is the tip of mon-intra.
+            base=HEAD^1
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            git fetch --no-tags --depth=1 origin "$BEFORE"
+            base=$BEFORE
+          else
+            base=
+          fi
+
+          if [ -n "$base" ]; then
+            git diff --name-only "$base" HEAD > "$RUNNER_TEMP/changed.txt"
+          else
+            : > "$RUNNER_TEMP/changed.txt"
+          fi
+          python3 .github/helper/mon_intra_select_tests.py < "$RUNNER_TEMP/changed.txt" > "$RUNNER_TEMP/modules.txt"
+
+          {
+            echo "modules=$(tr '\n' ' ' < "$RUNNER_TEMP/modules.txt")"
+            if grep -qE '\.(js|ts|vue|css|scss|less)$|(^|/)package\.json$|(^|/)yarn\.lock$' "$RUNNER_TEMP/changed.txt"; then
+              echo "build_assets=1"
+            else
+              echo "build_assets=0"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Changed files"
+            echo '```'
+            cat "$RUNNER_TEMP/changed.txt"
+            echo '```'
+            echo "### Test modules selected"
+            if [ -s "$RUNNER_TEMP/modules.txt" ]; then
+              sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/modules.txt"
+            else
+              echo "None near the change: install smoke test only."
+            fi
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Install system packages and bench
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends redis-server mariadb-client libmariadb-dev pkg-config
+          pip install frappe-bench
+          echo "127.0.0.1 $SITE" | sudo tee -a /etc/hosts
+
+      - name: bench init (Mon-Intra/frappe @ mon-intra)
+        working-directory: /home/runner
+        run: |
+          bench init --skip-assets --python "$(which python)" \
+            --frappe-path "$FRAPPE_REPO" --frappe-branch "$FRAPPE_BRANCH" \
+            frappe-bench
+          cd frappe-bench
+          # Only web, workers and redis are needed for tests.
+          sed -i -E 's/^(watch|schedule|socketio|redis_socketio):/# &/' Procfile
+
+      - name: bench get-app erpnext (this checkout)
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench get-app erpnext "$GITHUB_WORKSPACE" --skip-assets
+          bench setup requirements --dev
+
+      - name: Build assets (frontend files changed)
+        if: steps.select.outputs.build_assets == '1'
+        working-directory: /home/runner/frappe-bench
+        run: CI=Yes bench build --app erpnext
+
+      - name: Install smoke test (new site with erpnext)
+        working-directory: /home/runner/frappe-bench
+        run: |
+          bench start > bench_start.log 2>&1 &
+          for port in $(python -c "import json,re;c=json.load(open('sites/common_site_config.json'));print(*[re.search(r':(\d+)',c[k]).group(1) for k in ('redis_cache','redis_queue')])"); do
+            timeout 60 bash -c "until (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; do sleep 1; done"
+          done
+
+          bench new-site "$SITE" \
+            --db-host 127.0.0.1 --db-root-username root --db-root-password root \
+            --mariadb-user-host-login-scope='%' \
+            --admin-password admin --install-app erpnext
+
+          # Mail and host settings upstream's tests expect (from .github/helper).
+          python - "$GITHUB_WORKSPACE/.github/helper/site_config_mariadb.json" <<'PY'
+          import json, subprocess, sys
+          skip = {"db_host", "db_port", "db_name", "db_password", "install_apps", "root_login", "root_password"}
+          for key, value in json.load(open(sys.argv[1])).items():
+              if key not in skip:
+                  subprocess.run(["bench", "--site", "test_site", "set-config", "--parse", key, repr(value)], check=True)
+          PY
+          bench --site "$SITE" set-config allow_tests true
+
+          bench --site "$SITE" list-apps | tee apps.txt
+          grep -q '^erpnext' apps.txt
+          bench --site "$SITE" execute frappe.db.get_value --args "['Module Def', 'Stock', 'app_name']" | grep -q erpnext
+
+      - name: Run tests near the change
+        if: steps.select.outputs.modules != ''
+        working-directory: /home/runner/frappe-bench
+        env:
+          MODULES: ${{ steps.select.outputs.modules }}
+        run: |
+          failed=()
+          for module in $MODULES; do
+            echo "::group::$module"
+            bench --site "$SITE" run-tests --lightmode --module "$module" || failed+=("$module")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf '::error::Failed: %s\n' "${failed[@]}"
+            exit 1
+          fi
+
+      - name: Show bench output
+        if: always()
+        run: cat /home/runner/frappe-bench/bench_start.log || true

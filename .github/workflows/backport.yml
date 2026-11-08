@@ -1,6 +1,7 @@
 name: Backport
 on:
   pull_request_target:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
     types:
       - closed
       - labeled
