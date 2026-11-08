@@ -2,6 +2,7 @@ name: Server (Postgres)
 
 on:
   pull_request:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
     paths-ignore:
       - '**.js'
       - '**.md'

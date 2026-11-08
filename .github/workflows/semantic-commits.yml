@@ -1,7 +1,8 @@
 name: Semantic Commits
 
 on:
-  pull_request: {}
+  pull_request:
+    branches-ignore: [mon-intra] # Mon-Intra: upstream CI is off on our branch, see mon-intra-ci.yml
 
 permissions:
   contents: read
